@@ -14,6 +14,7 @@ export const DEFAULT_ENV = {
 process.env = DEFAULT_ENV;
 
 export const DEFAULT_CONFIG = {
+  base: './', // Use relative paths for assets (needed for Electron file:// loading)
   build: {
     // This quiets the "module has been externalized for browser compatibility" warnings that
     // vite throws when building for production.

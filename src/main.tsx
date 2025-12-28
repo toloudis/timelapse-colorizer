@@ -1,6 +1,6 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
-import { createBrowserRouter, RouterProvider } from "react-router-dom";
+import { createBrowserRouter, createHashRouter, RouterProvider } from "react-router-dom";
 
 import { getBuildDisplayDateString } from "src/colorizer/utils/math_utils";
 import { BASE_URL, INTERNAL_BUILD, VERSION_NUMBER } from "src/constants";
@@ -9,9 +9,12 @@ import AppStyle from "src/styles/AppStyle";
 import { decodeGitHubPagesUrl, isEncodedPathUrl, tryRemoveHashRouting } from "src/utils/gh_routing";
 import Viewer from "src/Viewer";
 
+// Detect if running in Electron via file:// protocol
+const isElectron = window.location.protocol === "file:";
+
 // Decode URL path if it was encoded for GitHub pages or uses hash routing.
 const locationUrl = new URL(window.location.toString());
-if (locationUrl.hash !== "" || isEncodedPathUrl(locationUrl)) {
+if (!isElectron && (locationUrl.hash !== "" || isEncodedPathUrl(locationUrl))) {
   const decodedUrl = tryRemoveHashRouting(decodeGitHubPagesUrl(locationUrl));
   const newRelativePath = decodedUrl.pathname + decodedUrl.search + decodedUrl.hash;
   console.log("Redirecting to " + newRelativePath);
@@ -23,24 +26,27 @@ if (locationUrl.hash !== "" || isEncodedPathUrl(locationUrl)) {
 console.log(`Timelapse Feature Explorer - Version ${VERSION_NUMBER}`);
 console.log(`Timelapse Feature Explorer - Basename ${BASE_URL}`);
 console.log(`Timelapse Feature Explorer - Last built ${getBuildDisplayDateString()}`);
+console.log(`Timelapse Feature Explorer - Running in ${isElectron ? "Electron" : "Browser"}`);
 INTERNAL_BUILD && console.log("Timelapse Feature Explorer - --INTERNAL BUILD--");
 
 // Set up react router
-const router = createBrowserRouter(
-  [
-    {
-      path: "/",
-      element: <LandingPage />,
-      errorElement: <ErrorPage />,
-    },
-    {
-      path: "viewer",
-      element: <Viewer />,
-      errorElement: <ErrorPage />,
-    },
-  ],
-  { basename: import.meta.env.BASE_URL }
-);
+// Use hash-based routing for Electron (file:// protocol), browser routing for web
+const routes = [
+  {
+    path: "/",
+    element: <LandingPage />,
+    errorElement: <ErrorPage />,
+  },
+  {
+    path: "viewer",
+    element: <Viewer />,
+    errorElement: <ErrorPage />,
+  },
+];
+
+const router = isElectron
+  ? createHashRouter(routes)
+  : createBrowserRouter(routes, { basename: BASE_URL });
 
 // Render React component
 const container = document.getElementById("root");

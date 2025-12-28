@@ -45,7 +45,7 @@
     "prettier": "^2.8.7",
     "semver": "^7.6.0",
     "typescript": "^5.8.2",
-    "vite": "^5.4.15",
+    "vite": "^5.4.21",
     "vite-plugin-glsl": "^1.1.2",
     "vite-plugin-svgr": "^4.0.0",
     "vitest": "^0.34.3",
