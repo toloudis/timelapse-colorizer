@@ -51,7 +51,14 @@ export const DEFAULT_CONFIG = {
     ],
   },
   resolve: {
-    alias: [{ find: "src", replacement: resolve(__dirname, "./src") }],
+    alias: [
+      { find: "src", replacement: resolve(__dirname, "./src") },
+      // Force all React imports to resolve to TFE's own copy, preventing
+      // duplicate React instances when dependencies (e.g. vole-core) resolve
+      // React from the workspace root.
+      { find: "react", replacement: resolve(__dirname, "./node_modules/react") },
+      { find: "react-dom", replacement: resolve(__dirname, "./node_modules/react-dom") },
+    ],
   },
   worker: {
     // Fixes an invalid output format error when building
