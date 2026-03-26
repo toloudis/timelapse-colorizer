@@ -33,7 +33,13 @@ import {
   OUTLINE_COLOR_DEFAULT,
 } from "src/colorizer/constants";
 import type Dataset from "src/colorizer/Dataset";
-import { DrawMode, FeatureDataType, type FrameLoadResult, type PixelIdInfo } from "src/colorizer/types";
+import {
+  DrawMode,
+  FeatureDataType,
+  type FrameLoadResult,
+  type PixelIdInfo,
+  SelectionOutlineColorMode,
+} from "src/colorizer/types";
 import { getGlobalIdFromSegId, hasPropertyChanged } from "src/colorizer/utils/data_utils";
 import { convertCanvasOffsetPxToFrameCoords, getFrameSizeInScreenPx } from "src/colorizer/utils/math_utils";
 import { packDataTexture } from "src/colorizer/utils/texture_utils";
@@ -47,7 +53,7 @@ import {
 
 import type { IInnerRenderCanvas } from "./IInnerRenderCanvas";
 import TrackPath2D from "./tracks/TrackPath2D";
-import { get2DCanvasScaling } from "./utils";
+import { get2DCanvasScaling, getTrackPathColor } from "./utils";
 
 import pickFragmentShader from "./shaders/cellId_RGBA8U.frag";
 import vertexShader from "./shaders/colorize.vert";
@@ -74,6 +80,9 @@ type ColorizeUniformTypes = {
   featureData: Texture;
   outlierData: Texture;
   inRangeIds: Texture;
+  selectedIds: Texture;
+  selectedTracksPalette: Texture;
+  useTracksPalette: boolean;
   /** LUT mapping from segmentation ID (raw pixel value) to the global ID. */
   segIdToGlobalId: DataTexture;
   segIdOffset: number;
@@ -94,7 +103,6 @@ type ColorizeUniformTypes = {
   outlineColor: Color;
   edgeColor: Color;
   edgeColorAlpha: number;
-  highlightedId: number;
   hideOutOfRange: boolean;
   outlierDrawMode: number;
   outOfRangeDrawMode: number;
@@ -114,6 +122,7 @@ const getDefaultUniforms = (): ColorizeUniforms => {
   const emptyFeature = packDataTexture([0], FeatureDataType.F32);
   const emptyOutliers = packDataTexture([0], FeatureDataType.U8);
   const emptyInRangeIds = packDataTexture([0], FeatureDataType.U8);
+  const emptyIsSelectedIds = packDataTexture([0], FeatureDataType.U8);
   const emptyColorRamp = new ColorRamp(["#aaa", "#fff"]).texture;
   return {
     panOffset: new Uniform(new Vector2(0, 0)),
@@ -123,6 +132,9 @@ const getDefaultUniforms = (): ColorizeUniforms => {
     featureData: new Uniform(emptyFeature),
     outlierData: new Uniform(emptyOutliers),
     inRangeIds: new Uniform(emptyInRangeIds),
+    selectedIds: new Uniform(emptyIsSelectedIds),
+    selectedTracksPalette: new Uniform(emptyColorRamp),
+    useTracksPalette: new Uniform(false),
     segIdToGlobalId: new Uniform(emptySegIdToGlobalId),
     segIdOffset: new Uniform(0),
     overlay: new Uniform(emptyOverlay),
@@ -133,7 +145,6 @@ const getDefaultUniforms = (): ColorizeUniforms => {
     featureColorRampMin: new Uniform(0),
     featureColorRampMax: new Uniform(1),
     colorRamp: new Uniform(emptyColorRamp),
-    highlightedId: new Uniform(-1),
     hideOutOfRange: new Uniform(false),
     backgroundColor: new Uniform(new Color(FRAME_BACKGROUND_COLOR_DEFAULT)),
     outlineColor: new Uniform(new Color(OUTLINE_COLOR_DEFAULT)),
@@ -156,7 +167,7 @@ export default class ColorizeCanvas2D implements IInnerRenderCanvas {
   private pickMesh: Mesh;
 
   private vectorField: VectorField;
-  private trackPath: TrackPath2D;
+  private trackPaths: Map<number, TrackPath2D> = new Map();
 
   private savedScaleInfo: Canvas2DScaleInfo;
   private lastFrameLoadResult: FrameLoadResult | null;
@@ -220,8 +231,7 @@ export default class ColorizeCanvas2D implements IInnerRenderCanvas {
     this.vectorField = new VectorField();
     this.scene.add(this.vectorField.sceneObject);
 
-    this.trackPath = new TrackPath2D();
-    this.scene.add(...this.trackPath.getSceneObjects());
+    this.trackPaths = new Map<number, TrackPath2D>();
 
     this.pickScene = new Scene();
     this.pickScene.add(this.pickMesh);
@@ -315,7 +325,7 @@ export default class ColorizeCanvas2D implements IInnerRenderCanvas {
     if (this.params?.dataset) {
       this.updateScaling(this.params.dataset.frameResolution, this.canvasResolution);
     }
-    this.trackPath.setZoom(zoom);
+    this.trackPaths.forEach((trackPath) => trackPath.setZoom(zoom));
     this.render();
   }
 
@@ -328,7 +338,9 @@ export default class ColorizeCanvas2D implements IInnerRenderCanvas {
     this.panOffset = newOffset.clone();
     this.setUniform("panOffset", this.panOffset);
 
-    this.trackPath.setPositionAndScale(this.panOffset, this.savedScaleInfo.frameToCanvasCoordinates);
+    this.trackPaths.forEach((trackPath) =>
+      trackPath.setPositionAndScale(this.panOffset, this.savedScaleInfo.frameToCanvasCoordinates)
+    );
     this.vectorField.setPosition(this.panOffset, this.savedScaleInfo.frameToCanvasCoordinates);
     this.render();
   }
@@ -419,7 +431,7 @@ export default class ColorizeCanvas2D implements IInnerRenderCanvas {
     this.setUniform("canvasSizePx", canvasResolution);
     this.setUniform("canvasToFrameScale", canvasToFrameCoordinates);
 
-    this.trackPath.setPositionAndScale(this.panOffset, frameToCanvasCoordinates);
+    this.trackPaths.forEach((trackPath) => trackPath.setPositionAndScale(this.panOffset, frameToCanvasCoordinates));
     this.vectorField.setPosition(this.panOffset, frameToCanvasCoordinates);
     this.vectorField.setScale(frameToCanvasCoordinates, this.canvasResolution || new Vector2(1, 1));
   }
@@ -493,6 +505,57 @@ export default class ColorizeCanvas2D implements IInnerRenderCanvas {
     this.onRenderCallback = callback;
   }
 
+  private updateTrackPaths(prevParams: RenderCanvasStateParams | null, params: RenderCanvasStateParams): void {
+    if (hasPropertyChanged(params, prevParams, ["tracks"])) {
+      // Add and remove TrackPath2D objects as necessary, reusing objects where
+      // possible.
+      const prevTracks = new Set(prevParams ? prevParams.tracks.keys() : []);
+      const newTracks = new Set(params.tracks.keys());
+      const allTracks = new Set([...prevTracks, ...newTracks]);
+
+      const removedTrackIds: number[] = [];
+      const addedTrackIds: number[] = [];
+      for (const trackId of allTracks) {
+        if (prevTracks.has(trackId) && !newTracks.has(trackId)) {
+          removedTrackIds.push(trackId);
+        } else if (!prevTracks.has(trackId) && newTracks.has(trackId)) {
+          addedTrackIds.push(trackId);
+        }
+      }
+
+      // Remove unused TrackPath2D objects
+      const unusedTrackPaths: TrackPath2D[] = [];
+      for (const trackId of removedTrackIds) {
+        const trackPath = this.trackPaths.get(trackId);
+        if (trackPath) {
+          this.scene.remove(...trackPath.getSceneObjects());
+          unusedTrackPaths.push(trackPath);
+          this.trackPaths.delete(trackId);
+        }
+      }
+      // Add new TrackPath2D objects, reusing unused ones where possible
+      for (const trackId of addedTrackIds) {
+        const track = params.tracks.get(trackId);
+        if (track) {
+          const trackPath = unusedTrackPaths.pop() ?? new TrackPath2D();
+          trackPath.setParams({ ...params, track });
+          trackPath.setZoom(this.zoomMultiplier);
+          trackPath.setPositionAndScale(this.panOffset, this.savedScaleInfo.frameToCanvasCoordinates);
+          this.trackPaths.set(trackId, trackPath);
+          this.scene.add(...trackPath.getSceneObjects());
+        }
+      }
+      // Cleanup unused TrackPath2D objects
+      unusedTrackPaths.forEach((trackPath) => trackPath.dispose());
+    }
+
+    // Update params for all TrackPath2D objects.
+    this.trackPaths.forEach((trackPath, trackId) => {
+      const track = params.tracks.get(trackId) ?? null;
+      trackPath.setParams({ ...params, track, outlineColor: getTrackPathColor(track, params) });
+    });
+  }
+
   public async setParams(params: RenderCanvasStateParams): Promise<void> {
     // TODO: What happens when `setParams` is called again while waiting for a Dataset to load?
     // May cause visual desync where the color ramp/feature data updates before frames load in fully
@@ -541,7 +604,7 @@ export default class ColorizeCanvas2D implements IInnerRenderCanvas {
     }
 
     // Update track path data
-    this.trackPath.setParams(params, prevParams);
+    this.updateTrackPaths(prevParams, params);
 
     // Update vector data
     if (hasPropertyChanged(params, prevParams, ["vectorVisible", "vectorColor", "vectorScaleFactor"])) {
@@ -594,6 +657,16 @@ export default class ColorizeCanvas2D implements IInnerRenderCanvas {
           this.setUniform("useRepeatingCategoricalColors", params.colorRamp.type === ColorRampType.CATEGORICAL);
         }
       }
+    }
+
+    if (hasPropertyChanged(params, prevParams, ["isSelectedLut"])) {
+      this.setUniform("selectedIds", packDataTexture(Array.from(params.isSelectedLut), FeatureDataType.U8));
+    }
+    if (hasPropertyChanged(params, prevParams, ["outlinePaletteRamp"])) {
+      this.setUniform("selectedTracksPalette", params.outlinePaletteRamp.texture);
+    }
+    if (hasPropertyChanged(params, prevParams, ["tracks", "outlineColorMode"])) {
+      this.setUniform("useTracksPalette", params.outlineColorMode === SelectionOutlineColorMode.USE_PALETTE);
     }
 
     this.render();
@@ -723,21 +796,13 @@ export default class ColorizeCanvas2D implements IInnerRenderCanvas {
   // RENDERING /////////////////////////////////////////////////////////////////////////////
 
   private syncTrackPathLine(): void {
-    this.trackPath.updateVisibleRange(this.currentFrame);
-  }
-
-  private syncHighlightedId(): void {
-    // Hide highlight if no track is selected
-    if (!this.params?.track) {
-      this.setUniform("highlightedId", -1);
-      return;
-    }
-    this.setUniform("highlightedId", this.params?.track.getIdAtTime(this.currentFrame));
+    this.trackPaths.forEach((trackPath) => {
+      trackPath.updateVisibleRange(this.currentFrame);
+    });
   }
 
   public render(_options?: RenderOptions): void {
     this.checkPixelRatio();
-    this.syncHighlightedId();
     this.syncTrackPathLine();
 
     this.renderer.render(this.scene, this.camera);
@@ -749,7 +814,7 @@ export default class ColorizeCanvas2D implements IInnerRenderCanvas {
     this.geometry.dispose();
     this.renderer.dispose();
     this.pickMaterial.dispose();
-    this.trackPath.dispose();
+    this.trackPaths.forEach((trackPath) => trackPath.dispose());
   }
 
   public getIdAtPixel(x: number, y: number): PixelIdInfo | null {

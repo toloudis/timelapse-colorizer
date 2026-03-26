@@ -1,28 +1,32 @@
+import { ExportOutlined } from "@ant-design/icons";
 import { Button, Tooltip } from "antd";
 import Plotly, { type PlotData, type PlotMarker } from "plotly.js-dist-min";
-import React, { memo, type ReactElement, useContext, useEffect, useMemo, useRef, useState } from "react";
+import React, { memo, type ReactElement, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import styled from "styled-components";
 import { Color, type ColorRepresentation } from "three";
 
 import { SwitchIconSVG } from "src/assets";
-import { ColorRampType, type Dataset } from "src/colorizer";
-import { TIME_FEATURE_KEY } from "src/colorizer/Dataset";
-import { DrawMode, type HexColorString, PlotRangeType } from "src/colorizer/types";
+import { ColorRampType, type Dataset, type Track } from "src/colorizer";
+import { CENTROID_Y_FEATURE_KEY, TIME_FEATURE_KEY } from "src/colorizer/Dataset";
+import { DrawMode, type HexColorString, PlotRangeType, ViewMode } from "src/colorizer/types";
 import type { ShowAlertBannerCallback } from "src/components/Banner/hooks";
 import IconButton from "src/components/Buttons/IconButton";
+import TextButton from "src/components/Buttons/TextButton";
 import SelectionDropdown from "src/components/Dropdowns/SelectionDropdown";
 import type { SelectItem } from "src/components/Dropdowns/types";
 import LoadingSpinner from "src/components/LoadingSpinner";
+import { SHORTCUT_KEYS } from "src/constants";
 import { useDebounce } from "src/hooks";
 import { useViewerStateStore } from "src/state/ViewerState";
 import { AppThemeContext } from "src/styles/AppStyle";
 import { FlexRow, FlexRowAlignCenter } from "src/styles/utils";
-
+import { downloadCsv } from "src/utils/file_io";
 import {
   type DataArray,
   drawCrosshair,
   getBucketIndex,
   getHoverTemplate,
+  getScatterplotDataAsCsv,
   isHistogramEvent,
   makeEmptyTraceData,
   makeLineTrace,
@@ -30,7 +34,8 @@ import {
   splitTraceData,
   subsampleColorRamp,
   type TraceData,
-} from "./scatter_plot_data_utils";
+} from "src/utils/scatter_plot_data_utils";
+import { areAnyHotkeysPressed } from "src/utils/user_input";
 
 // TODO: Translate into seconds/minutes/hours for datasets where frame duration is known?
 
@@ -61,6 +66,8 @@ const ScatterPlotContainer = styled.div`
     // Remove Plotly border
     border: 0px solid transparent !important;
   }
+  // Center plot horizontally
+  margin: 0 auto;
 `;
 
 /**
@@ -70,7 +77,6 @@ export default memo(function ScatterPlotTab(props: ScatterPlotTabProps): ReactEl
   // ^ Memo prevents re-rendering if the props haven't changed.
   const theme = useContext(AppThemeContext);
 
-  const clearTrack = useViewerStateStore((state) => state.clearTrack);
   const colorRamp = useViewerStateStore((state) => state.colorRamp);
   const currentFrame = useViewerStateStore((state) => state.currentFrame);
   const inRangeLUT = useViewerStateStore((state) => state.inRangeLUT);
@@ -78,22 +84,39 @@ export default memo(function ScatterPlotTab(props: ScatterPlotTabProps): ReactEl
   const outOfRangeDrawSettings = useViewerStateStore((state) => state.outOfRangeDrawSettings);
   const rangeType = useViewerStateStore((state) => state.scatterRangeType);
   const selectedFeatureKey = useViewerStateStore((state) => state.featureKey);
-  const selectedTrack = useViewerStateStore((state) => state.track);
+  const tracks = useViewerStateStore((state) => state.tracks);
+  const addTracks = useViewerStateStore((state) => state.addTracks);
+  const toggleTrack = useViewerStateStore((state) => state.toggleTrack);
+  const setTracks = useViewerStateStore((state) => state.setTracks);
+  const clearTracks = useViewerStateStore((state) => state.clearTracks);
   const setFrame = useViewerStateStore((state) => state.setFrame);
   const setRangeType = useViewerStateStore((state) => state.setScatterRangeType);
-  const setTrack = useViewerStateStore((state) => state.setTrack);
   const setXAxis = useViewerStateStore((state) => state.setScatterXAxis);
   const setYAxis = useViewerStateStore((state) => state.setScatterYAxis);
   const xAxisFeatureKey = useViewerStateStore((state) => state.scatterXAxis);
   const yAxisFeatureKey = useViewerStateStore((state) => state.scatterYAxis);
+  const viewMode = useViewerStateStore((state) => state.viewMode);
+
+  const xAxisPlotRange = useRef<[number, number]>([-Infinity, Infinity]);
+  const yAxisPlotRange = useRef<[number, number]>([-Infinity, Infinity]);
+
+  const resetXAxisPlotRange = useCallback((): void => {
+    xAxisPlotRange.current = [-Infinity, Infinity];
+  }, []);
+  const resetYAxisPlotRange = useCallback((): void => {
+    yAxisPlotRange.current = [-Infinity, Infinity];
+  }, []);
 
   // Debounce changes to the dataset to prevent noticeably blocking the UI thread with a re-render.
+  const datasetKey = useViewerStateStore((state) => state.datasetKey);
   const rawDataset = useViewerStateStore((state) => state.dataset);
   const rawCategoricalPalette = useViewerStateStore((state) => state.categoricalPalette);
   const rawColorRampRange = useViewerStateStore((state) => state.colorRampRange);
   const dataset = useDebounce(rawDataset, 500);
   const categoricalPalette = useDebounce(rawCategoricalPalette, 100);
   const [colorRampMin, colorRampMax] = useDebounce(rawColorRampRange, 100);
+
+  const plottedIds = useRef<Set<number>>(new Set());
 
   const isDebouncePending =
     dataset !== rawDataset || colorRampMin !== rawColorRampRange[0] || colorRampMax !== rawColorRampRange[1];
@@ -136,16 +159,19 @@ export default memo(function ScatterPlotTab(props: ScatterPlotTabProps): ReactEl
 
   useEffect(() => {
     const onClick = (): void => {
-      // A point was recently clicked so ignore the click event.
-      if (timeOfLastPointClicked.current + PLOTLY_CLICK_TIMEOUT_MS > Date.now()) {
+      if (
+        timeOfLastPointClicked.current + PLOTLY_CLICK_TIMEOUT_MS > Date.now() ||
+        currentRangeType.current === PlotRangeType.CURRENT_TRACK ||
+        areAnyHotkeysPressed(SHORTCUT_KEYS.viewport.multiTrackSelect.keycode)
+      ) {
+        // Skip if a point was recently clicked, or if the tracks should not be cleared
+        // (e.g. during multi-select mode or in current track range view).
         return;
       }
       // Start a timeout to clear the track, which will be cleared if a plotly
       // click event occurs.
       emptyClickTimeout.current = window.setTimeout(() => {
-        if (currentRangeType.current !== PlotRangeType.CURRENT_TRACK) {
-          clearTrack();
-        }
+        clearTracks();
       }, PLOTLY_CLICK_TIMEOUT_MS);
     };
 
@@ -155,7 +181,7 @@ export default memo(function ScatterPlotTab(props: ScatterPlotTabProps): ReactEl
     return () => {
       xyPlotDiv?.removeEventListener("click", onClick);
     };
-  }, [plotDivRef.current, clearTrack]);
+  }, [plotDivRef.current, clearTracks]);
 
   // Trigger render spinner when playback starts, but only if the render is being delayed.
   // If a render is allowed to happen (such as in the current-track- or current-frame-only
@@ -186,19 +212,19 @@ export default memo(function ScatterPlotTab(props: ScatterPlotTabProps): ReactEl
   }, [hasConfigChanged]);
 
   //////////////////////////////////
-  // Click Handlers
+  // Event Handlers
   //////////////////////////////////
 
   // Add click event listeners to the plot. When clicking a point, find the track and jump to
   // that frame.
   useEffect(() => {
-    const onClickPlot = (eventData: Plotly.PlotMouseEvent): void => {
+    const onClickPlot = async (eventData: Plotly.PlotMouseEvent): Promise<void> => {
       if (!dataset || eventData.points.length === 0 || isHistogramEvent(eventData)) {
         return;
       }
 
       // Clear any timeouts for detecting clicks on blank areas of the plot.
-      if (emptyClickTimeout.current) {
+      if (emptyClickTimeout.current !== null) {
         clearTimeout(emptyClickTimeout.current);
         emptyClickTimeout.current = null;
       }
@@ -212,16 +238,52 @@ export default memo(function ScatterPlotTab(props: ScatterPlotTabProps): ReactEl
         return;
       }
       const frame = dataset.times ? dataset.times[objectId] : track.times[0];
-      setFrame(frame).then(() => {
-        setTrack(track);
-      });
+      await setFrame(frame);
+      if (currentRangeType.current === PlotRangeType.CURRENT_FRAME) {
+        if (areAnyHotkeysPressed(SHORTCUT_KEYS.viewport.multiTrackSelect.keycode)) {
+          toggleTrack(track);
+        } else {
+          // Select only the clicked track.
+          setTracks(track);
+        }
+      } else if (currentRangeType.current === PlotRangeType.ALL_TIME) {
+        // Assume we are either selecting a track while none is selected, or selecting
+        // a different timepoint in the same track.
+        addTracks(track);
+      }
     };
 
     plotRef?.on("plotly_click", onClickPlot);
     return () => {
       plotRef?.removeAllListeners("plotly_click");
     };
-  }, [plotRef, dataset, setTrack, setFrame]);
+  }, [plotRef, dataset, addTracks, setFrame, toggleTrack, setTracks]);
+
+  // Sync axis ranges on relayout events (zoom)
+  useEffect(() => {
+    const onRelayout = (eventData: Plotly.PlotRelayoutEvent): void => {
+      if (eventData["xaxis.autorange"]) {
+        resetXAxisPlotRange();
+      } else {
+        const xRange0 = eventData["xaxis.range[0]"] ?? xAxisPlotRange.current[0];
+        const xRange1 = eventData["xaxis.range[1]"] ?? xAxisPlotRange.current[1];
+        xAxisPlotRange.current[0] = Math.min(xRange0, xRange1);
+        xAxisPlotRange.current[1] = Math.max(xRange0, xRange1);
+      }
+      if (eventData["yaxis.autorange"]) {
+        resetYAxisPlotRange();
+      } else {
+        const yRange0 = eventData["yaxis.range[0]"] ?? yAxisPlotRange.current[0];
+        const yRange1 = eventData["yaxis.range[1]"] ?? yAxisPlotRange.current[1];
+        yAxisPlotRange.current[0] = Math.min(yRange0, yRange1);
+        yAxisPlotRange.current[1] = Math.max(yRange0, yRange1);
+      }
+    };
+    plotRef?.on("plotly_relayout", onRelayout);
+    return () => {
+      plotRef?.removeAllListeners("plotly_relayout");
+    };
+  }, [plotRef, resetXAxisPlotRange, resetYAxisPlotRange]);
 
   //////////////////////////////////
   // Helper Methods
@@ -285,20 +347,26 @@ export default memo(function ScatterPlotTab(props: ScatterPlotTabProps): ReactEl
   };
 
   /**
-   * Reduces the given data to only show the selected range (frame, track, or all data points).
+   * Reduces the given data to only show the selected range (frame, track, or
+   * all data points).
    * @param rawXData raw data for the X-axis feature
    * @param rawYData raw data for the Y-axis feature.
+   * @param range The range type to filter the data by.
+   * @param track Required if `range` is `PlotRangeType.CURRENT_TRACK`. The
+   * track to filter data by.
    * @returns One of the following:
    *   - `undefined` if the data could not be filtered.
    *   - An object with the following arrays:
    *     - `xData`: The filtered x data.
    *     - `yData`: The filtered y data.
-   *     - `objectIds`: The object IDs corresponding to the index of the filtered data.
+   *     - `objectIds`: The object IDs corresponding to the index of the
+   *       filtered data.
    */
   const filterDataByRange = (
     rawXData: DataArray,
     rawYData: DataArray,
-    range: PlotRangeType
+    range: PlotRangeType,
+    track?: Track
   ):
     | undefined
     | {
@@ -334,17 +402,17 @@ export default memo(function ScatterPlotTab(props: ScatterPlotTabProps): ReactEl
       }
     } else if (range === PlotRangeType.CURRENT_TRACK) {
       // Filter data to only show the current track.
-      if (!selectedTrack) {
+      if (!track) {
         return { xData: [], yData: [], objectIds: [], segIds: [], trackIds: [] };
       }
-      for (let i = 0; i < selectedTrack.ids.length; i++) {
-        const id = selectedTrack.ids[i];
+      for (let i = 0; i < track.ids.length; i++) {
+        const id = track.ids[i];
         xData.push(rawXData[id]);
         yData.push(rawYData[id]);
       }
-      objectIds = Array.from(selectedTrack.ids);
+      objectIds = Array.from(track.ids);
       segIds = objectIds.map(dataset.getSegmentationId);
-      trackIds = Array(selectedTrack.ids.length).fill(selectedTrack.trackId);
+      trackIds = Array(track.ids.length).fill(track.trackId);
     } else {
       // All time
       objectIds = [...rawXData.keys()];
@@ -377,14 +445,14 @@ export default memo(function ScatterPlotTab(props: ScatterPlotTabProps): ReactEl
     histogramTrace: Partial<PlotData>;
   } => {
     let scatterPlotAxis: Partial<Plotly.LayoutAxis> = {
-      domain: [0, 0.8],
+      domain: [0, 0.85],
       showgrid: false,
+      showline: true,
       zeroline: true,
     };
     const histogramAxis: Partial<Plotly.LayoutAxis> = {
-      domain: [0.85, 1],
+      domain: [0.9, 1],
       showgrid: false,
-      zeroline: true,
       hoverformat: "f",
     };
     const newHistogramTrace = { ...histogramTrace };
@@ -392,17 +460,26 @@ export default memo(function ScatterPlotTab(props: ScatterPlotTabProps): ReactEl
     let min = dataset?.getFeatureData(featureKey)?.min || 0;
     let max = dataset?.getFeatureData(featureKey)?.max || 0;
 
+    if (0 < min && min < (max - min) / 20) {
+      // If min is close to zero (within 5% of the range), snap to zero.
+      min = 0;
+    }
     if (dataset && dataset.isFeatureCategorical(featureKey)) {
       // Add extra padding for categories so they're nicely centered
       min -= 0.5;
       max += 0.5;
     } else {
-      // Add a little padding to the min/max so points aren't cut off by the edge of the plot.
+      // Add a little padding to the max so points aren't cut off by the edge of the plot.
       // (ideally this would be a pixel padding, but plotly doesn't support that.)
-      min -= (max - min) / 10;
-      max += (max - min) / 10;
+      max += (max - min) / 100;
     }
     scatterPlotAxis.range = [min, max];
+    if (viewMode === ViewMode.VIEW_2D && featureKey === CENTROID_Y_FEATURE_KEY) {
+      // In 2D mode, the origin (0,0) is in the top left corner, versus in plot
+      // the origin is in the bottom left by default. Reverse the Y-axis
+      // centroid value in 2D so the plot matches the onscreen objects.
+      scatterPlotAxis.range = [max, min];
+    }
 
     // TODO: Show categories as box and whisker plots instead of scatterplot?
     // TODO: Add special handling for integer features once implemented, so their histograms use reasonable
@@ -446,18 +523,21 @@ export default memo(function ScatterPlotTab(props: ScatterPlotTabProps): ReactEl
 
   // TODO: Move to `scatter_plot_data_utils.ts`
   /**
-   * Applies coloring to point traces in a scatterplot. Does this by splitting the data into multiple traces each with a solid
-   * color, which is much faster than using Plotly's native color ramping. Also enforces a maximum number of points
-   * per trace, which significantly speeds up Plotly renders.
+   * Applies coloring to point traces in a scatterplot. Does this by splitting
+   * the data into multiple traces each with a solid color, which is much faster
+   * than using Plotly's native color ramping. Also enforces a maximum number of
+   * points per trace, which significantly speeds up Plotly renders.
    *
    * @param xData
    * @param yData
    * @param objectIds
    * @param trackIds
-   * @param markerConfig Additional marker configuration to apply to all points. By default,
-   * markers are size 4.
-   * @param {Color | undefined} overrideColor When defined, uses a base color for all points, instead of
-   * calculating based on the color ramp or palette.
+   * @param markerConfig Additional marker configuration to apply to all points.
+   * By default, markers are size 4.
+   * @param {Color | undefined} overrideColor When defined, uses a base color
+   * for all points, instead of calculating based on the color ramp or palette.
+   * @param allowHover Whether to allow hover tooltips on the points, true by
+   * default. When false, hover info is disabled.
    */
   const colorizeScatterplotPoints = (
     xData: DataArray,
@@ -631,7 +711,7 @@ export default memo(function ScatterPlotTab(props: ScatterPlotTabProps): ReactEl
     yAxisFeatureKey,
     rangeType,
     currentFrame,
-    selectedTrack,
+    tracks,
     isVisible,
     isPlaying,
     plotDivRef.current,
@@ -643,6 +723,8 @@ export default memo(function ScatterPlotTab(props: ScatterPlotTabProps): ReactEl
     colorRamp,
     inRangeLUT,
     categoricalPalette,
+    resetXAxisPlotRange,
+    resetYAxisPlotRange,
   ];
 
   const renderPlot = (forceRelayout: boolean = false): void => {
@@ -662,8 +744,10 @@ export default memo(function ScatterPlotTab(props: ScatterPlotTabProps): ReactEl
     }
     const { xData, yData, segIds, objectIds, trackIds } = result;
 
+    plottedIds.current = new Set(objectIds);
+
     let markerBaseColor = undefined;
-    if (rangeType === PlotRangeType.ALL_TIME && selectedTrack) {
+    if (rangeType === PlotRangeType.ALL_TIME && tracks.size > 0) {
       // Use a light grey for other markers when a track is selected.
       markerBaseColor = new Color("#dddddd");
     }
@@ -680,13 +764,13 @@ export default memo(function ScatterPlotTab(props: ScatterPlotTabProps): ReactEl
       {},
       markerBaseColor,
       // disable hover for all points other than the track when one is selected
-      selectedTrack === null || rangeType !== PlotRangeType.ALL_TIME
+      tracks.size === 0 || rangeType !== PlotRangeType.ALL_TIME
     );
 
     const xHistogram: Partial<Plotly.PlotData> = {
       x: xData,
       name: "x density",
-      marker: { color: theme.color.themeLight, line: { color: theme.color.themeDark, width: 1 } },
+      marker: { color: theme.color.plots.histogram, line: { color: theme.color.plots.histogramOutline, width: 1 } },
       yaxis: "y2",
       type: "histogram",
       // @ts-ignore. TODO: Update once the plotly types are updated.
@@ -695,7 +779,7 @@ export default memo(function ScatterPlotTab(props: ScatterPlotTabProps): ReactEl
     const yHistogram: Partial<PlotData> = {
       y: yData,
       name: "y density",
-      marker: { color: theme.color.themeLight, line: { color: theme.color.themeDark, width: 1 } },
+      marker: { color: theme.color.plots.histogram, line: { color: theme.color.plots.histogramOutline, width: 1 } },
       xaxis: "x2",
       type: "histogram",
       // @ts-ignore. TODO: Update once the plotly types are updated.
@@ -706,44 +790,48 @@ export default memo(function ScatterPlotTab(props: ScatterPlotTabProps): ReactEl
     traces.push(yHistogram);
 
     // Render current track as an extra trace.
-    const trackData = filterDataByRange(rawXData, rawYData, PlotRangeType.CURRENT_TRACK);
-    if (trackData && rangeType !== PlotRangeType.CURRENT_FRAME) {
-      // Render an extra trace for lines connecting the points in the current track when time is a feature.
-      if (isUsingTime) {
-        traces.push(
-          makeLineTrace(trackData.xData, trackData.yData, trackData.objectIds, trackData.segIds, trackData.trackIds)
-        );
-      }
-      // Render track points
-      const outOfRangeOutlineColor = outOfRangeDrawSettings.color.clone().multiplyScalar(0.8);
-      const trackTraces = colorizeScatterplotPoints(
-        trackData.xData,
-        trackData.yData,
-        trackData.objectIds,
-        trackData.segIds,
-        trackData.trackIds,
-        {
-          outOfRange: {
-            color: theme.color.layout.background,
-            line: { width: 1, color: "#" + outOfRangeOutlineColor.getHexString() + "40" },
-          },
+    for (const track of tracks.values()) {
+      const trackData = filterDataByRange(rawXData, rawYData, PlotRangeType.CURRENT_TRACK, track);
+      if (trackData && rangeType !== PlotRangeType.CURRENT_FRAME) {
+        // Render an extra trace for lines connecting the points in the current track when time is a feature.
+        if (isUsingTime) {
+          traces.push(
+            makeLineTrace(trackData.xData, trackData.yData, trackData.objectIds, trackData.segIds, trackData.trackIds)
+          );
         }
-      );
-      traces.push(...trackTraces);
+        // Connect track points as a line trace.
+        const outOfRangeOutlineColor = outOfRangeDrawSettings.color.clone().multiplyScalar(0.8);
+        const trackTraces = colorizeScatterplotPoints(
+          trackData.xData,
+          trackData.yData,
+          trackData.objectIds,
+          trackData.segIds,
+          trackData.trackIds,
+          {
+            outOfRange: {
+              color: theme.color.layout.background,
+              line: { width: 1, color: "#" + outOfRangeOutlineColor.getHexString() + "40" },
+            },
+          }
+        );
+        traces.push(...trackTraces);
+        plottedIds.current = new Set([...plottedIds.current, ...trackData.objectIds]);
+      }
     }
 
-    // Render currently selected object as an extra crosshair trace.
-    if (selectedTrack) {
-      const currentObjectId = selectedTrack.getIdAtTime(currentFrame);
+    // Render crosshair at the current time for all tracks.
+    for (const track of tracks.values()) {
+      const currentObjectId = track.getIdAtTime(currentFrame);
       if (currentObjectId !== -1) {
         traces.push(...drawCrosshair(rawXData[currentObjectId], rawYData[currentObjectId]));
+        // Extra single point, so the point is still visible over the crosshair.
         traces.push(
           ...colorizeScatterplotPoints(
             [rawXData[currentObjectId]],
             [rawYData[currentObjectId]],
             [currentObjectId],
             [dataset.getSegmentationId(currentObjectId)],
-            [selectedTrack.trackId],
+            [track.trackId],
             { size: 4 }
           )
         );
@@ -768,14 +856,14 @@ export default memo(function ScatterPlotTab(props: ScatterPlotTabProps): ReactEl
 
     // Add extra margin for categorical feature labels on the Y axis.
     const leftMarginPx = Math.max(60, estimateTextWidthPxForCategories(yAxisFeatureKey));
-    const layout = {
+    const layout: Partial<Plotly.Layout> = {
       autosize: true,
       showlegend: false,
       xaxis: scatterPlotXAxis,
       yaxis: scatterPlotYAxis,
       xaxis2: histogramXAxis,
       yaxis2: histogramYAxis,
-      margin: { l: leftMarginPx, r: 50, b: 50, t: 20, pad: 4 },
+      margin: { l: leftMarginPx, r: 50, b: 50, t: 20 },
       font: {
         // Unfortunately using the Lato font family causes the text to render with SEVERE
         // aliasing. Using the default plotly font family causes the X and Y axes to be
@@ -788,12 +876,12 @@ export default memo(function ScatterPlotTab(props: ScatterPlotTabProps): ReactEl
 
     if (forceRelayout || shouldPlotUiReset()) {
       uiRevision.current += 1;
-      // @ts-ignore. TODO: Update once the plotly types are updated.
-      layout.uirevision = uiRevision.current;
-    } else {
-      // @ts-ignore. TODO: Update once the plotly types are updated.
-      layout.uirevision = uiRevision.current;
+      // Reset axis ranges because zoom will be reset.
+      resetXAxisPlotRange();
+      resetYAxisPlotRange();
     }
+    // @ts-ignore. TODO: Update once the plotly types are updated.
+    layout.uirevision = uiRevision.current;
 
     try {
       Plotly.react(plotDivRef.current, traces, layout, PLOTLY_CONFIG).then(() => {
@@ -836,6 +924,35 @@ export default memo(function ScatterPlotTab(props: ScatterPlotTabProps): ReactEl
   // Component Rendering
   //////////////////////////////////
 
+  const canDownloadScatterPlotCsv =
+    dataset !== null && xAxisFeatureKey !== null && yAxisFeatureKey !== null && selectedFeatureKey !== null;
+
+  const downloadScatterPlotCsv = useCallback(() => {
+    if (!canDownloadScatterPlotCsv) {
+      return;
+    }
+    const featureSet = new Set([xAxisFeatureKey, yAxisFeatureKey, selectedFeatureKey]);
+    // Remove time as a feature axis if present, since it's included already as
+    // a metadata column in the CSV.
+    featureSet.delete(TIME_FEATURE_KEY);
+    const features = Array.from(featureSet);
+    const filters = new Map([
+      [xAxisFeatureKey, xAxisPlotRange.current],
+      [yAxisFeatureKey, yAxisPlotRange.current],
+    ]);
+    const csvString = getScatterplotDataAsCsv(dataset, Array.from(plottedIds.current), inRangeLUT, features, filters);
+    const name = datasetKey ? `${datasetKey}-scatterplot.csv` : "scatterplot.csv";
+    downloadCsv(name, csvString);
+  }, [
+    dataset,
+    datasetKey,
+    xAxisFeatureKey,
+    yAxisFeatureKey,
+    selectedFeatureKey,
+    canDownloadScatterPlotCsv,
+    inRangeLUT,
+  ]);
+
   const menuItems = useMemo((): SelectItem[] => {
     const featureKeys = dataset ? dataset.featureKeys : [];
     return featureKeys.map((key: string) => {
@@ -845,33 +962,52 @@ export default memo(function ScatterPlotTab(props: ScatterPlotTabProps): ReactEl
 
   const makeControlBar = (menuItems: SelectItem[]): ReactElement => {
     return (
-      <FlexRowAlignCenter $gap={6} style={{ flexWrap: "wrap" }}>
-        <SelectionDropdown label={"X"} selected={xAxisFeatureKey || ""} items={menuItems} onChange={setXAxis} />
-        <Tooltip title="Swap axes" trigger={["hover", "focus"]}>
-          <IconButton
-            onClick={() => {
-              const temp = xAxisFeatureKey;
-              setXAxis(yAxisFeatureKey);
-              setYAxis(temp);
-            }}
-            type="link"
-          >
-            <SwitchIconSVG />
-          </IconButton>
-        </Tooltip>
-        <SelectionDropdown label={"Y"} selected={yAxisFeatureKey || ""} items={menuItems} onChange={setYAxis} />
-
-        <div style={{ marginLeft: "10px" }}>
+      <FlexRow $gap={6}>
+        <FlexRowAlignCenter $gap={6} style={{ flexWrap: "wrap", width: "100%" }}>
           <SelectionDropdown
-            label={"Show objects from"}
-            selected={rangeType}
-            items={PLOT_RANGE_SELECT_ITEMS}
-            controlWidth={"120px"}
-            onChange={(value: string) => setRangeType(value as PlotRangeType)}
-            showSelectedItemTooltip={false}
-          ></SelectionDropdown>
-        </div>
-      </FlexRowAlignCenter>
+            label={"X"}
+            selected={xAxisFeatureKey || ""}
+            items={menuItems}
+            onChange={setXAxis}
+            controlWidth="100%"
+            containerStyle={{ flexGrow: 1, flexBasis: "200px", flexShrink: 1 }}
+          />
+          <Tooltip title="Swap axes" trigger={["hover", "focus"]}>
+            <IconButton
+              onClick={() => {
+                const temp = xAxisFeatureKey;
+                setXAxis(yAxisFeatureKey);
+                setYAxis(temp);
+              }}
+              type="link"
+            >
+              <SwitchIconSVG />
+            </IconButton>
+          </Tooltip>
+          <SelectionDropdown
+            label={"Y"}
+            selected={yAxisFeatureKey || ""}
+            items={menuItems}
+            onChange={setYAxis}
+            controlWidth="100%"
+            containerStyle={{ flexGrow: 1, flexBasis: "200px", flexShrink: 1 }}
+          />
+          <div style={{ marginLeft: "10px" }}>
+            <SelectionDropdown
+              label={"Show objects from"}
+              selected={rangeType}
+              items={PLOT_RANGE_SELECT_ITEMS}
+              controlWidth={"120px"}
+              onChange={(value: string) => setRangeType(value as PlotRangeType)}
+              showSelectedItemTooltip={false}
+            ></SelectionDropdown>
+          </div>
+        </FlexRowAlignCenter>
+        <TextButton onClick={downloadScatterPlotCsv} disabled={!canDownloadScatterPlotCsv}>
+          <ExportOutlined style={{ marginRight: "2px" }} />
+          Export CSV
+        </TextButton>
+      </FlexRow>
     );
   };
 
@@ -881,11 +1017,11 @@ export default memo(function ScatterPlotTab(props: ScatterPlotTabProps): ReactEl
         <Button
           onClick={() => {
             setIsRendering(true);
-            clearTrack();
+            clearTracks();
           }}
-          disabled={selectedTrack === null}
+          disabled={tracks.size === 0}
         >
-          Clear Track
+          Clear Tracks
         </Button>
 
         <Button
@@ -908,7 +1044,7 @@ export default memo(function ScatterPlotTab(props: ScatterPlotTabProps): ReactEl
         <LoadingSpinner loading={isRendering || isDebouncePending} style={{ marginTop: "10px" }}>
           {makePlotButtons()}
           <ScatterPlotContainer
-            style={{ width: "100%", height: "475px", padding: "5px" }}
+            style={{ width: "calc(min(100%, 680px))", aspectRatio: "7 / 6", padding: "5px" }}
             ref={plotDivRef}
           ></ScatterPlotContainer>
         </LoadingSpinner>

@@ -9,7 +9,24 @@ uniform usampler2D outlierData;
  * is within the threshold range. Note that data is packed into a square texture.
  */
 uniform usampler2D inRangeIds;
-/** Min and max feature values that define the endpoints of the color map. Values
+/** 
+ * A mapping of IDs that are selected in the current track(s). If an object's
+ * index is `i`, `selectedIds[i] >= 1` if the object is selected.
+ *
+ * For selected objects, `selectedIds[i] - 1` is the index into the
+ * `selectedTracksPalette` for the outline color that should be used when
+ * `useTracksPalette` is true.
+ */
+uniform usampler2D selectedIds;
+/**
+ * If true, uses the `selectedTracksPalette` to outline selected tracks, and
+ * shows an additional inner outline. When false, uses `outlineColor` for
+ * outlines.
+ */
+uniform bool useTracksPalette;
+uniform sampler2D selectedTracksPalette;
+/** 
+ * Min and max feature values that define the endpoints of the color map. Values
  * outside the range will be clamped to the nearest endpoint.
  */
 uniform float featureColorRampMin;
@@ -21,7 +38,7 @@ uniform float featureColorRampMax;
  * 
  * For a given segmentation ID `segId`, the global ID is given by:
  * `segIdToGlobalId[segId - segIdOffset] - 1`.
-*/
+ */
 uniform usampler2D segIdToGlobalId;
 uniform uint segIdOffset;
 
@@ -50,7 +67,6 @@ const uint DRAW_MODE_COLOR = 1u;
 const uint RAW_BACKGROUND_ID = 0u;
 const int MISSING_DATA_ID = -1;
 const int ID_OFFSET = 1;
-const int NO_HIGHLIGHT_ID = -1;
 const float OUTLINE_WIDTH_PX = 2.0;
 const float EDGE_WIDTH_PX = 1.0;
 
@@ -58,8 +74,6 @@ uniform vec3 outlierColor;
 uniform uint outlierDrawMode;
 uniform vec3 outOfRangeColor;
 uniform uint outOfRangeDrawMode;
-
-uniform int highlightedId;
 
 uniform bool useRepeatingCategoricalColors;
 
@@ -139,6 +153,15 @@ vec4 getCategoricalColor(float featureValue) {
   // The categorical texture uses no interpolation, so when sampling, `modValue`
   // is rounded to the nearest integer.
   return getColorRamp(modValue / (width - 1.0));
+}
+
+vec4 getOutlineColor(int colorIdx) {
+  if (!useTracksPalette) {
+    return vec4(outlineColor, 1);
+  }
+  float width = float(textureSize(selectedTracksPalette, 0).x);
+  float adjustedIdx = (0.5 + float(colorIdx)) / width;
+  return texture(selectedTracksPalette, vec2(adjustedIdx, 0.5));
 }
 
 /**
@@ -224,10 +247,17 @@ vec4 getObjectColor(vec2 sUv, float opacity) {
   }
 
   // do an outline around highlighted object
-  if (highlightedId != NO_HIGHLIGHT_ID && id == highlightedId) {
+  uint selectionIdx = getUintFromTex(selectedIds, id).r;
+  if (selectionIdx > 0u) {
     if (isEdge(sUv, labelId, OUTLINE_WIDTH_PX)) {
-      // ignore opacity for edge color
-      return vec4(outlineColor, 1.0);
+      int colorIdx = int(selectionIdx) - 1;
+      vec4 color = getOutlineColor(colorIdx);
+      return vec4(color.rgb, 1.0);
+    } else if (isEdge(sUv, labelId, OUTLINE_WIDTH_PX + 2.0) && useTracksPalette) {
+      // When coloring with the track palette, apply an additional 2px inner
+      // outline using the background color for better contrast against the
+      // track outline color.
+      return vec4(backgroundColor, 1.0);
     }
   }
 

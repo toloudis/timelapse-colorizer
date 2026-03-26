@@ -15,17 +15,21 @@ const EXAMPLE_SLICE_1: Partial<ConfigSlice> = {
   showTrackPath: false,
   trackPathColor: new Color(0x00ff00),
   trackPathWidthPx: 2,
+  trackPathColorRampKey: "matplotlib-cool",
+  trackPathIsColorRampReversed: false,
   trackPathColorMode: TrackPathColorMode.USE_CUSTOM_COLOR,
   showTrackPathBreaks: false,
   trackPathPastSteps: 70,
   trackPathFutureSteps: 100,
   showAllTrackPathPastSteps: false,
   showAllTrackPathFutureSteps: true,
+  persistTrackPathWhenOutOfRange: false,
   showScaleBar: false,
   showTimestamp: false,
   outOfRangeDrawSettings: { color: new Color(0xff0000), mode: DrawMode.USE_COLOR },
   outlierDrawSettings: { color: new Color(0x00ff00), mode: DrawMode.USE_COLOR },
   outlineColor: new Color(0x0000ff),
+  outlinePaletteKey: "neon",
   edgeColor: new Color(0x808080),
   edgeColorAlpha: 128 / 255, // 0x80
   edgeMode: DrawMode.USE_COLOR,
@@ -37,9 +41,11 @@ const EXAMPLE_SLICE_1_PARAMS: SerializedStoreData = {
   [UrlParam.SHOW_PATH]: "0",
   [UrlParam.PATH_COLOR]: "00ff00",
   [UrlParam.PATH_WIDTH]: "2",
+  [UrlParam.PATH_COLOR_RAMP]: "matplotlib-cool",
   [UrlParam.PATH_COLOR_MODE]: TrackPathColorMode.USE_CUSTOM_COLOR.toString(),
   [UrlParam.SHOW_PATH_BREAKS]: "0",
   [UrlParam.PATH_STEPS]: "70,100!",
+  [UrlParam.PATH_PERSIST_OUT_OF_RANGE]: "0",
   [UrlParam.SHOW_SCALEBAR]: "0",
   [UrlParam.SHOW_TIMESTAMP]: "0",
   [UrlParam.FILTERED_COLOR]: "ff0000",
@@ -47,6 +53,7 @@ const EXAMPLE_SLICE_1_PARAMS: SerializedStoreData = {
   [UrlParam.OUTLIER_COLOR]: "00ff00",
   [UrlParam.OUTLIER_MODE]: DrawMode.USE_COLOR.toString(),
   [UrlParam.OUTLINE_COLOR]: "0000ff",
+  [UrlParam.OUTLINE_PALETTE_KEY]: "neon",
   [UrlParam.EDGE_COLOR]: "80808080",
   [UrlParam.EDGE_MODE]: "1",
   [UrlParam.OPEN_TAB]: TabType.SCATTER_PLOT,
@@ -57,17 +64,21 @@ const EXAMPLE_SLICE_2: Partial<ConfigSlice> = {
   showTrackPath: true,
   trackPathColor: new Color(0xffff00),
   trackPathWidthPx: 3,
+  trackPathColorRampKey: "esri-blue_red_8",
+  trackPathIsColorRampReversed: true,
   trackPathColorMode: TrackPathColorMode.USE_OUTLINE_COLOR,
   showTrackPathBreaks: true,
   trackPathPastSteps: 25,
   trackPathFutureSteps: 0,
   showAllTrackPathPastSteps: true,
   showAllTrackPathFutureSteps: false,
+  persistTrackPathWhenOutOfRange: true,
   showScaleBar: true,
   showTimestamp: true,
   outOfRangeDrawSettings: { color: new Color(0xffff00), mode: DrawMode.HIDE },
   outlierDrawSettings: { color: new Color(0x00ffff), mode: DrawMode.HIDE },
   outlineColor: new Color(0xff00ff),
+  outlinePaletteKey: "adobe",
   edgeColor: new Color(0xa0b0c0),
   edgeColorAlpha: 208 / 255, // 0xd0
   edgeMode: DrawMode.HIDE,
@@ -79,9 +90,11 @@ const EXAMPLE_SLICE_2_PARAMS: SerializedStoreData = {
   [UrlParam.SHOW_PATH]: "1",
   [UrlParam.PATH_COLOR]: "ffff00",
   [UrlParam.PATH_WIDTH]: "3",
+  [UrlParam.PATH_COLOR_RAMP]: "esri-blue_red_8!",
   [UrlParam.PATH_COLOR_MODE]: TrackPathColorMode.USE_OUTLINE_COLOR.toString(),
   [UrlParam.SHOW_PATH_BREAKS]: "1",
   [UrlParam.PATH_STEPS]: "25!,0",
+  [UrlParam.PATH_PERSIST_OUT_OF_RANGE]: "1",
   [UrlParam.SHOW_SCALEBAR]: "1",
   [UrlParam.SHOW_TIMESTAMP]: "1",
   [UrlParam.FILTERED_COLOR]: "ffff00",
@@ -89,6 +102,7 @@ const EXAMPLE_SLICE_2_PARAMS: SerializedStoreData = {
   [UrlParam.OUTLIER_COLOR]: "00ffff",
   [UrlParam.OUTLIER_MODE]: DrawMode.HIDE.toString(),
   [UrlParam.OUTLINE_COLOR]: "ff00ff",
+  [UrlParam.OUTLINE_PALETTE_KEY]: "adobe",
   [UrlParam.EDGE_COLOR]: "a0b0c0d0",
   [UrlParam.EDGE_MODE]: DrawMode.HIDE.toString(),
   [UrlParam.OPEN_TAB]: TabType.SETTINGS,
@@ -111,6 +125,7 @@ describe("ConfigSlice", () => {
       result.current.setOutOfRangeDrawSettings({ color: new Color(0xff0000), mode: DrawMode.USE_COLOR });
       result.current.setOutlierDrawSettings({ color: new Color(0x00ff00), mode: DrawMode.USE_COLOR });
       result.current.setOutlineColor(new Color(0x0000ff));
+      result.current.setOutlinePaletteKey("neon");
       result.current.setEdgeColor(new Color(0x808080), 128 / 255); // 0x80
       result.current.setEdgeMode(DrawMode.USE_COLOR);
       result.current.setOpenTab(TabType.FILTERS);
@@ -128,6 +143,7 @@ describe("ConfigSlice", () => {
     expect(result.current.outOfRangeDrawSettings).toEqual({ color: new Color(0xff0000), mode: DrawMode.USE_COLOR });
     expect(result.current.outlierDrawSettings).toEqual({ color: new Color(0x00ff00), mode: DrawMode.USE_COLOR });
     expect(result.current.outlineColor).toEqual(new Color(0x0000ff));
+    expect(result.current.outlinePaletteKey).toBe("neon");
     expect(result.current.edgeColor).toEqual(new Color(0x808080));
     expect(result.current.edgeColorAlpha).toBe(128 / 255);
     expect(result.current.edgeMode).toBe(DrawMode.USE_COLOR);
@@ -146,6 +162,7 @@ describe("ConfigSlice", () => {
       result.current.setOutOfRangeDrawSettings({ color: new Color(0x00ff00), mode: DrawMode.HIDE });
       result.current.setOutlierDrawSettings({ color: new Color(0xff0000), mode: DrawMode.HIDE });
       result.current.setOutlineColor(new Color(0x00ff00));
+      result.current.setOutlinePaletteKey("adobe");
       result.current.setEdgeColor(new Color(0xa0b0c0), 208 / 255); // 0xd0
       result.current.setEdgeMode(DrawMode.HIDE);
       result.current.setOpenTab(TabType.TRACK_PLOT);
@@ -162,6 +179,7 @@ describe("ConfigSlice", () => {
     expect(result.current.outOfRangeDrawSettings).toEqual({ color: new Color(0x00ff00), mode: DrawMode.HIDE });
     expect(result.current.outlierDrawSettings).toEqual({ color: new Color(0xff0000), mode: DrawMode.HIDE });
     expect(result.current.outlineColor).toEqual(new Color(0x00ff00));
+    expect(result.current.outlinePaletteKey).toBe("adobe");
     expect(result.current.edgeColor).toEqual(new Color(0xa0b0c0));
     expect(result.current.edgeColorAlpha).toBe(208 / 255);
     expect(result.current.openTab).toBe(TabType.TRACK_PLOT);

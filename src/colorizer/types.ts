@@ -81,6 +81,11 @@ export const featureTypeSpecs: { [T in FeatureDataType]: FeatureTypeSpec<T> } = 
 
 // CANVAS //////////////////////////////////////
 
+export const enum ViewMode {
+  VIEW_2D = "2d",
+  VIEW_3D = "3d",
+}
+
 export type FrameLoadResult = {
   frame: number;
   /** True if frame loading encountered an error. */
@@ -104,10 +109,16 @@ export const isDrawMode = (mode: number): mode is DrawMode => {
   return mode === DrawMode.HIDE || mode === DrawMode.USE_COLOR;
 };
 
+export const enum SelectionOutlineColorMode {
+  USE_PALETTE = 0,
+  USE_CUSTOM_COLOR = 1,
+}
+
 export const enum TrackPathColorMode {
   USE_OUTLINE_COLOR = 0,
   USE_CUSTOM_COLOR = 1,
   USE_FEATURE_COLOR = 2,
+  USE_COLOR_MAP = 3,
 }
 
 // Similar to `FeatureType`, but indicates that thresholds are lossy when it comes
